@@ -2,6 +2,7 @@ package info.kwarc.mws.crawler
 
 import java.io._
 import scala.xml._
+import org.htmlcleaner._
 
 abstract class Converter {
   def inFormat : String
@@ -18,52 +19,169 @@ class ComposedConverter(head : Converter, tail : Converter) extends Converter {
   def apply(in : Node) = head(in).flatMap(tail.apply)
 }
 
-class GapXMLConverter(inFormat : String, outFormat : String) extends BaseConverter(inFormat, outFormat) {
+case class GapSnippet(title : String, name : String, id : String, body : Node)
+
+class GapXMLConverter extends BaseConverter("gapdoc", "temahtml") {
+  
+  val url = new java.net.URL("http://latexml.mathweb.org/convert");
+  val latexmlService = new LaTeXMLService(url);
+      
+//println(latexmlService.convert("12", "$$E=mc^2$$"));
+
+  def error(s : String) = println(s)
+  def isSectionStart(n : Node) : Boolean = {
+    n.label == "p" && n.child.size == 1 && n.child.head.label == "a" && !(n.child.head \ "@id").text.isEmpty 
+  }
+  
+  //assumes isSectionStart holds
+  def getSectionStartId(n : Node) : String = {
+    (n.child.head \ "@id").text
+  }
+  
   def apply(n : Node) : List[Node] = {
-    var snippets : List[Node] = Nil
-    n.child foreach {
-      case c if c.label == "p" && (c \ "@id").text == ??? => ???
-      case _ => ??? /// recurse
+    (n \\ "body").toList match {
+      case body :: Nil => 
+        val snippets = processBody(body)
+        val docs = snippets map {gs => 
+          processSnippet(gs.title, gs.name, gs.id, gs.body)
+        }
+        docs.toList
+      case Nil => 
+        error("no body found")
+        Nil
+      case _ => 
+        error("more than one body found")
+        Nil
+    }
+  }
+  
+  def processSnippet(title : String, name : String, id : String, body : Node) : Node = {
+    val url = "http://www.gap-system.org/Manuals/doc/ref/" + name + "#" + id
+    val procedSnippet = replaceTex(body)
+    <html> 
+      <head>
+        <title>{title}</title>
+        <meta name="url" content={url}></meta>
+      </head>
+      {procedSnippet}
+    </html>
+  }
+  
+  def replaceTex(n : Node) : Node = n match {
+    case n if n.label == "span" && ((n \ "@class").text == "SimpleMath") => 
+      val tex = n.child.mkString(" ")
+      val mathS = latexmlService.convert("math", tex)
+      val math = XML.loadString(mathS)
+      val hash = (new java.util.Random).nextLong.toString
+      val attr = new UnprefixedAttribute("id", hash, math.attributes)
+      new Elem(math.prefix, math.label, attr, math.scope, math.child :_*)
+    case e : Elem =>
+      val nc = e.child.map(replaceTex)
+      new Elem(e.prefix, e.label, e.attributes, e.scope, e.minimizeEmpty, nc :_*)
+    case other => other
+  }
+  
+  
+  //returns a list of snippets (with id)
+  def processBody(body : Node) : List[GapSnippet] = {
+    var snippets : List[GapSnippet] = Nil
+    var foundHead  = false
+    var currHead : String = null
+    var currSnippet : List[Node] = Nil
+    body.child foreach {
+      case c if isSectionStart(c) => 
+        if (foundHead) {
+          val gs = GapSnippet("TODO", "TODO", currHead, <body> {currSnippet} </body>)
+          snippets ::= gs
+        } else foundHead = true
+        currHead = getSectionStartId(c)
+        currSnippet = Nil
+      case c if foundHead => 
+        currSnippet :+= c //TODO inefficient
+      case c if !foundHead => //ignore for now
     }
     snippets
-  } 
+  }
+  
 }
-
 
 abstract class Traverser(converter : Converter) {
   def apply(outFolder : File) : Unit
   def writeOut(outFolder : File, name : String, content : String) : Unit = {
     val outFile = new File(outFolder, name)
+    val pr = new PrintWriter(outFile)
+    pr.write(content)
+    pr.close()
   }
 }
 
 class FileTraverser(start : File, converter : Converter) extends Traverser(converter) {
+  var counter = 1
+  
+  
   def apply(outFolder : File) : Unit = {
     recurse(start) {s : String =>
-      val n : Node = ??? // parse string to node
+      val n : Node = XML.loadString(s) // parse string to node
       val snippets = converter(n)
+      println(snippets)
       snippets foreach { sn => 
-        writeOut(outFolder, ???, sn.toString)
+        writeOut(outFolder, counter.toString + ".html", sn.toString)
+        counter += 1
       }
     }
+  }
+  
+  
+  def parseXML(s : String) : String = {
+    val props : CleanerProperties = new CleanerProperties();
+ 
+    // set some properties to non-default values
+    props.setTranslateSpecialEntities(true);
+    props.setTransResCharsToNCR(true);
+    props.setOmitComments(true);
+ 
+    // do parsing
+    val tagNode : TagNode  = new HtmlCleaner(props).clean(s);
+ 
+    // serialize to xml file
+    val sr = new SimpleXmlSerializer(props)
+    sr.getAsString(tagNode)
+    val newS = sr.getAsString(tagNode)
+    /*   
+    .writeToFile(
+      tagNode, "chinadaily.xml", "utf-8"
+    );
+    */
+    
+    newS
   }
   
   def recurse(f : File)(implicit proc : String => Unit) : Unit = {
     if (f.isDirectory()) {
       f.listFiles.foreach(recurse)
     } else { //file
-      val s = new StringBuilder
-      val in = new BufferedReader(new FileReader(f))
-      var line: String = ""
       try {
-        while (in.ready()) {
-          line = in.readLine
-          s.append(line + "\n")
+        val s = new StringBuilder
+        val in = new BufferedReader(new FileReader(f))
+        var line: String = ""
+        try {
+          while (in.ready()) {
+            line = in.readLine
+            if (!line.startsWith("<link") && !line.startsWith("<meta")) {
+              line = line.replaceAll("<br>", "<br/>")
+              s.append(line + "\n")
+            }
+          }
+        } finally {
+          in.close
         }
-      } finally {
-        in.close
+        val cleanedS = parseXML(s.result)
+        proc(cleanedS)
+      } catch {
+        case e : Exception => 
+          println(e.getMessage)
+          println("Failed on: " + f.toString())
       }
-      proc(s.result)
     }
   }
 }
