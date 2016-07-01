@@ -87,19 +87,34 @@ class GapXMLConverter extends BaseConverter("gapdoc", "temahtml") {
     var snippets : List[GapSnippet] = Nil
     var foundHead  = false
     var currHead : String = null
+    var currTitle = "TODO"
+    var currName = "TODO"
     var currSnippet : List[Node] = Nil
+    var prevIsSectionStart = false
     body.child foreach {
       case c if isSectionStart(c) => 
         if (foundHead) {
-          val gs = GapSnippet("TODO", "TODO", currHead, <body> {currSnippet} </body>)
+          val gs = GapSnippet(currTitle, currName, currHead, <body> {currSnippet} </body>)
           snippets ::= gs
-        } else foundHead = true
+        } else {
+          foundHead = true
+        }
+        prevIsSectionStart = true
         currHead = getSectionStartId(c)
         currSnippet = Nil
       case c if foundHead => 
+        if (prevIsSectionStart && (c.label == "h5" || c.label == "h4") ) {
+          currTitle = c.text
+        }
+        prevIsSectionStart = false
         currSnippet :+= c //TODO inefficient
       case c if !foundHead => //ignore for now
     }
+    if (foundHead) {
+      val gs = GapSnippet(currTitle, currName, currHead, <body> {currSnippet} </body>)
+      snippets ::= gs
+    }
+    
     snippets
   }
   
